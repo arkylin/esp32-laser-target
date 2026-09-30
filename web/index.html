@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#12151c">
+<title>LaserTarget-S3 蓝牙控制</title>
+<script>
+// 主题必须在 <body> 绘制前定下来，否则会闪一下默认配色。
+// key 与页面底部的主脚本共用；?theme=light 可临时指定（不写盘）。
+const THEME_KEY = 'laser.theme';
+const THEME_BG = { dark: '#12151c', light: '#eef1f6', contrast: '#000000', night: '#000000' };
+window.__applyTheme = t => {
+  const sys = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  const name = (!t || t === 'auto') ? sys : t;          // auto = 跟随系统
+  document.documentElement.dataset.theme = name;
+  document.documentElement.style.colorScheme = name === 'light' ? 'light' : 'dark';
+  const m = document.querySelector('meta[name=theme-color]');
+  if (m) m.content = THEME_BG[name] || THEME_BG.dark;
+  return name;
+};
+try { window.__theme = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { window.__theme = 'auto'; }
+window.__themeQuery = new URLSearchParams(location.search).get('theme');
+window.__applyTheme(window.__themeQuery || window.__theme);
+</script>
+<style>
+  /* ------------------------------------------------------------- 主题 ----
+     切主题只改这一组变量；html[data-theme] 由上面的小脚本尽早写入。
+     默认（无属性）等同 dark。 */
+  :root, html[data-theme="dark"]{
+    --bg:#12151c; --card:#1b202b; --line:#2c3342; --fg:#e8ecf4; --dim:#8b93a5;
+    --raise:#161a23; --sunken:#101319; --track:#252b37; --knob:#6b7385;
+    --accent:#2f6df6; --accent-fg:#fff;
+    --on:#ff4d4d; --on-track:#3a1518; --glow:rgba(255,77,77,.6);
+    --ok:#3ddc84; --warn:#ffb020; --err:#ff7a7a; --danger:#ff8f8f;
+    --note-bg:#2a2410; --note-line:#5a4a12; --note-fg:#ffd479;
+  }
+  /* 浅色：白天 / 户外 */
+  html[data-theme="light"]{
+    --bg:#eef1f6; --card:#fff; --line:#d5dbe6; --fg:#161b25; --dim:#6b7488;
+    --raise:#f5f7fb; --sunken:#f5f7fb; --track:#dde3ec; --knob:#b6bfd0;
+    --accent:#2f6df6; --accent-fg:#fff;
+    --on:#e03131; --on-track:#ffe3e3; --glow:rgba(224,49,49,.35);
+    --ok:#12a05a; --warn:#b87700; --err:#c92a2a; --danger:#c0392b;
+    --note-bg:#fff8e1; --note-line:#e6cf7a; --note-fg:#8a6100;
+  }
+  /* 高对比：强光下看屏幕 / 视力不佳 */
+  html[data-theme="contrast"]{
+    --bg:#000; --card:#000; --line:#fff; --fg:#fff; --dim:#c9c9c9;
+    --raise:#000; --sunken:#000; --track:#3a3a3a; --knob:#fff;
+    --accent:#ffd400; --accent-fg:#000;
+    --on:#ff2b2b; --on-track:#2a0000; --glow:rgba(255,43,43,.75);
+    --ok:#00e676; --warn:#ffd400; --err:#ff6b6b; --danger:#ff8a8a;
+    --note-bg:#000; --note-line:#ffd400; --note-fg:#ffd400;
+  }
+  /* 夜间：OLED 纯黑 + 暗红，不刺眼 */
+  html[data-theme="night"]{
+    --bg:#000; --card:#0b0b0d; --line:#232327; --fg:#d9c9c9; --dim:#8c7f7f;
+    --raise:#121215; --sunken:#0b0b0d; --track:#1c1c20; --knob:#5c4a4a;
+    --accent:#7a2b2b; --accent-fg:#ffe8e8;
+    --on:#ff3b30; --on-track:#2a0b0b; --glow:rgba(255,59,48,.45);
+    --ok:#4f9d6f; --warn:#c08a2e; --err:#ff6b60; --danger:#c98a8a;
+    --note-bg:#1a1210; --note-line:#4a2f1a; --note-fg:#e0a86a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+    font:16px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; align-items:center; gap:14px;
+    padding:18px 14px calc(18px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color:transparent;
+  }
+  .card{width:100%; max-width:460px; background:var(--card); border:1px solid var(--line);
+        border-radius:16px; padding:16px}
+  h1{font-size:18px; margin:0 0 4px; font-weight:600}
+  .sub{color:var(--dim); font-size:13px}
+
+  /* 顶部：设备名 + 连接状态 + 主题 */
+  .row{display:flex; align-items:center; gap:10px}
+  .dot{width:10px; height:10px; border-radius:50%; background:var(--dim); flex:none}
+  body.conn .dot{background:var(--ok); box-shadow:0 0 10px var(--ok)}
+  body.retry .dot{background:var(--warn); box-shadow:0 0 10px var(--warn)}
+  select.theme{
+    font:inherit; font-size:13px; color:var(--fg); background:var(--raise);
+    border:1px solid var(--line); border-radius:10px; padding:6px 8px; cursor:pointer;
+  }
+
+  button{
+    font:inherit; font-weight:600; color:var(--accent-fg); background:var(--accent);
+    border:0; border-radius:12px; padding:12px 16px; cursor:pointer; transition:.15s;
+  }
+  button:active{transform:scale(.97)}
+  #btn{flex:1; padding:14px; font-size:16px}
+  /* 已连接时连接按钮退居次要样式（此时点它 = 断开） */
+  body.conn #btn{background:var(--raise); color:var(--fg); border:1px solid var(--line)}
+
+  /* 大开关 */
+  .switch{position:relative; display:block; width:min(240px,72vw); height:min(120px,36vw);
+          margin:6px auto; border-radius:999px; background:var(--track);
+          border:2px solid var(--line); transition:.25s; cursor:pointer}
+  .switch input{position:absolute; inset:0; width:100%; height:100%; margin:0; opacity:0; cursor:pointer}
+  .knob{position:absolute; top:8px; left:8px; width:calc(min(120px,36vw) - 16px);
+        height:calc(min(120px,36vw) - 16px); border-radius:50%; background:var(--knob);
+        display:grid; place-items:center; font-size:calc(min(120px,36vw) * .3);
+        transition:.25s; pointer-events:none}
+  .switch.on{background:var(--on-track); border-color:var(--on)}
+  .switch.on .knob{left:calc(100% - min(120px,36vw) + 8px); background:var(--on);
+                   box-shadow:0 0 26px var(--glow)}
+  .switch.off .knob{background:var(--ok)}
+  .switch.dis{opacity:.4; cursor:not-allowed}
+  .state{text-align:center; font-size:26px; font-weight:700; margin:2px 0 6px}
+  .switch.dis ~ .state{color:var(--dim)}
+
+  /* 电量 */
+  .bar{height:8px; border-radius:99px; background:var(--track); overflow:hidden; margin-top:8px}
+  .bar i{display:block; height:100%; width:0; background:var(--ok); transition:.3s}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px}
+  .kv{background:var(--raise); border:1px solid var(--line); border-radius:10px; padding:8px 10px}
+  .kv b{display:block; font-size:19px; font-weight:600}
+  .kv span{color:var(--dim); font-size:12px}
+
+  /* 心跳灯控件 */
+  input[type=number]{font:inherit; font-size:14px; color:var(--fg); background:var(--raise);
+    border:1px solid var(--line); border-radius:8px; padding:5px 6px; width:74px; text-align:center}
+  input[type=checkbox].mini{width:18px; height:18px; accent-color:var(--accent); margin:0}
+  .label{display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none}
+  button.sec{background:var(--raise); color:var(--fg); border:1px solid var(--line);
+    padding:9px 12px; font-size:14px}
+
+  #log{height:150px; overflow:auto; background:var(--sunken); border:1px solid var(--line);
+       border-radius:10px; padding:8px 10px; font:12px/1.55 ui-monospace,Consolas,monospace;
+       white-space:pre-wrap; word-break:break-all}
+  #log .err{color:var(--err)}
+  #log .ok{color:var(--ok)}
+  .danger{color:var(--danger); font-size:12px; text-align:center; max-width:460px}
+  #nobt{display:none; border-color:var(--note-line); background:var(--note-bg); color:var(--note-fg); font-size:13px}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between; align-items:flex-start">
+    <div>
+      <h1>LaserTarget-S3</h1>
+      <div class="sub" id="devName">未连接</div>
+    </div>
+    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px">
+      <div class="row"><span class="dot"></span><span class="sub" id="connText">未连接</span></div>
+      <select class="theme" id="theme" aria-label="主题">
+        <option value="auto">跟随系统</option>
+        <option value="dark">深色</option>
+        <option value="light">浅色</option>
+        <option value="contrast">高对比</option>
+        <option value="night">夜间</option>
+      </select>
+    </div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <button id="btn">连接蓝牙</button>
+    <button class="sec" id="btnOff" disabled>关机</button>
+  </div>
+  <div class="sub" style="margin-top:8px">关机 = 设备进深度睡眠（省电），之后要按板子上的 <b>RST</b> 键才能再开机。</div>
+</div>
+
+<div class="card" id="nobt">
+  当前浏览器不支持 Web Bluetooth。<br>
+  · 安卓手机 / 电脑：用 <b>Chrome 或 Edge</b> 打开本页<br>
+  · iPhone / iPad：Safari 不支持，需装 <b>Bluefy</b> 浏览器打开<br>
+  · 微信 / QQ 内置浏览器同样不支持，请点右上角「在浏览器中打开」
+</div>
+
+<div class="card">
+  <label class="switch dis" id="switchWrap">
+    <input type="checkbox" id="sw" disabled>
+    <span class="knob">⏻</span>
+  </label>
+  <div class="state" id="stateText">—</div>
+  <div class="sub" style="text-align:center">点开关控制激光（未连接时不可操作）</div>
+
+  <div class="grid">
+    <div class="kv"><b id="soc">—</b><span>电量 (%)</span></div>
+    <div class="kv"><b id="volt">—</b><span>电压 (V)</span></div>
+  </div>
+  <div class="bar"><i id="bar"></i></div>
+  <div class="sub" style="margin-top:8px" id="upd">尚未收到数据</div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <div>
+      <div style="font-weight:600">心跳指示灯</div>
+      <div class="sub">每 10 s 亮一次（板载 RGB），用来看模块在电池供电下是否还在工作</div>
+    </div>
+    <label class="label sub"><input type="checkbox" class="mini" id="ledEn" disabled>开启</label>
+  </div>
+  <div class="row" style="margin-top:12px; flex-wrap:wrap">
+    <span class="sub">每次亮</span>
+    <input type="number" id="ledSec" min="0.1" max="30" step="0.1" value="1" disabled>
+    <span class="sub">秒</span>
+    <button class="sec" id="ledTest" disabled>立即闪一次</button>
+  </div>
+  <div class="sub" style="margin-top:8px">默认关闭；设置存在设备里，按 RST / 断电重上电之后依然有效。低电量时改用红色闪，一眼看出该充电了。</div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin-bottom:6px">省电设置</div>
+  <div class="row" style="flex-wrap:wrap">
+    <span class="sub">广播间隔</span>
+    <input type="number" id="advMs" min="20" max="10240" step="10" value="500" disabled>
+    <span class="sub">ms</span>
+    <button class="sec" id="advSet" disabled>设置</button>
+  </div>
+  <div class="sub" style="margin-top:8px">
+    越大越省电、越难被扫到（20 ~ 10240 ms，默认 500）。改动立刻生效并存进设备。<br>
+    当前固件只允许 <b>1 台</b>上位机在线：连上后设备停止广播（更省电），断开后自动恢复。
+  </div>
+  <div class="row" style="margin-top:12px; flex-wrap:wrap">
+    <label class="label sub"><input type="checkbox" class="mini" id="autoEn" disabled>无人连接自动关机</label>
+    <input type="number" id="autoMin" min="1" max="1440" step="1" value="5" disabled>
+    <span class="sub">分钟后</span>
+  </div>
+  <div class="sub" style="margin-top:8px">
+    电池供电、没人连接超过设定时间（1 ~ 1440 分钟，默认 5）就自动深度睡眠，效果等同按 BOOT 键关机。<br>
+    <b>插着 USB 时永不触发</b>：调试、充电、台架演示都不会被打扰。设置存进设备，按 RST / 断电后依然有效。
+  </div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin-bottom:6px">日志</div>
+  <div id="log"></div>
+</div>
+
+<div class="danger">⚠ 激光对眼睛有害，操作时勿直视光路；设备断电或最后一个客户端断开时会自动关闭激光。</div>
+
+<script>
+// ============================================================================
+//  LaserTarget-S3 Web Bluetooth 控制页（单文件、无依赖）
+//  协议（与固件 include/config.h 一致）：
+//    Control  7d000002  WRITE / WRITE_NR  0x00=关激光 0x01=开激光 0x02=关机(深睡)
+//    Status   7d000003  READ / NOTIFY     uint8 0=OFF 1=ON
+//    SOC      7d000004  READ / NOTIFY     uint8 0~100 (%)
+//    Voltage  7d000005  READ / NOTIFY     uint16 mV 小端
+//    LED      7d000006  WRITE / READ      [cmd, 时长 ds 小端] / [enable, 时长 ds 小端]
+//    Adv      7d000007  WRITE / READ      uint16 广播间隔 ms 小端
+//    Auto     7d000008  WRITE / READ      [mode, 分钟 小端] 写 / [enable, 分钟 小端] 读（自动关机）
+//  设置类特征都存在设备 NVS 里：按 RST、断电重上电之后依然有效。
+// ============================================================================
+const SVC  = '7d000001-7a5b-4a86-8d3f-123456789abc';
+const U = {
+  ctrl  : '7d000002-7a5b-4a86-8d3f-123456789abc',
+  status: '7d000003-7a5b-4a86-8d3f-123456789abc',
+  soc   : '7d000004-7a5b-4a86-8d3f-123456789abc',
+  volt  : '7d000005-7a5b-4a86-8d3f-123456789abc',
+  led   : '7d000006-7a5b-4a86-8d3f-123456789abc',
+  adv   : '7d000007-7a5b-4a86-8d3f-123456789abc',
+  auto  : '7d000008-7a5b-4a86-8d3f-123456789abc'
+};
+
+const $ = id => document.getElementById(id);
+const wrap = $('switchWrap'), sw = $('sw'), btn = $('btn'), logEl = $('log');
+const ledEn = $('ledEn'), ledSec = $('ledSec'), ledTest = $('ledTest'), btnOff = $('btnOff');
+const advSec = $('advMs'), advSet = $('advSet');
+const autoEn = $('autoEn'), autoMin = $('autoMin');
+
+let device = null, ch = {}, connected = false, manual = false, reconnecting = false;
+let lastReq = null;   // 最近一次期望的激光状态，用于判断设备有没有真的执行
+let lastCmdMs = 0;    // 最近一次点击时刻：静默窗口（250 ms）内的旧回报不回灌 UI
+let fallbackTimer = null;   // 兜底回读的防抖句柄（连点时只保留最后一次）
+
+// ------------------------------------------------------------ 数据解析 ----
+// 单独抽出，方便 ?selftest=1 里断言
+const dv = u8 => new DataView(new Uint8Array(u8).buffer);
+const parseStatus = d => d.getUint8(0) === 1;          // true = ON
+const parseSoc    = d => d.getUint8(0);                 // 255 = 未知
+const parseVolt   = d => d.getUint16(0, true);          // 小端 mV
+// 心跳灯命令打包：cmd + 时长（0.1 s 单位，uint16 小端）
+const ledBytes = (cmd, ds) => new Uint8Array([cmd, ds & 0xFF, (ds >> 8) & 0xFF]);
+
+// ---------------------------------------------------------------- 日志 ----
+function log(msg, cls) {
+  const t = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${t}] ${msg}`;
+  logEl.appendChild(line);
+  while (logEl.childElementCount > 200) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------------------------------------------------------------- UI ----
+function setConnected(ok) {
+  connected = ok;
+  document.body.classList.toggle('conn', ok);
+  document.body.classList.remove('retry');
+  $('connText').textContent = ok ? '已连接' : '未连接';
+  btn.textContent = ok ? '断开连接' : '连接蓝牙';
+  sw.disabled = !ok;
+  wrap.classList.toggle('dis', !ok);
+  ledEn.disabled = !ok;
+  ledSec.disabled = !ok;
+  ledTest.disabled = !ok;
+  btnOff.disabled = !ok;
+  advSec.disabled = !ok;
+  advSet.disabled = !ok;
+  autoEn.disabled = !ok;
+  autoMin.disabled = !ok;
+  if (!ok) {
+    // 断开后激光状态未知：可能还有别的客户端在线，所以不显示 OFF
+    setLaserUI(null);
+    $('upd').textContent = '已断开';
+  }
+}
+function setLaserUI(on) {
+  if (on === null || on === undefined) {
+    $('stateText').textContent = '—';
+    wrap.classList.remove('on', 'off');
+    sw.checked = false;
+    return;
+  }
+  $('stateText').textContent = on ? '激光 ON' : '激光 OFF';
+  wrap.classList.toggle('on', on);
+  wrap.classList.toggle('off', !on);
+  sw.checked = on;
+}
+function setBattery(soc, mv) {
+  const known = soc !== 0xFF && soc !== null;
+  $('soc').textContent = known ? soc : '—';
+  $('bar').style.width = (known ? soc : 0) + '%';
+  $('bar').style.background = !known ? 'var(--knob)' : soc >= 50 ? 'var(--ok)' : soc >= 20 ? 'var(--warn)' : 'var(--on)';
+  $('volt').textContent = mv ? (mv / 1000).toFixed(3) : '—';
+  $('upd').textContent = '最后更新 ' + new Date().toTimeString().slice(0, 8);
+}
+
+// ------------------------------------------------------------ 连接流程 ----
+async function connect() {
+  if (!navigator.bluetooth) return;
+  try {
+    log('打开蓝牙设备选择框…');
+    device = await navigator.bluetooth.requestDevice({
+      // 名字前缀 + 服务 UUID 两种过滤，任选其一都能选到设备
+      filters: [{ namePrefix: 'LaserTarget' }, { services: [SVC] }],
+      optionalServices: [SVC]
+    });
+    manual = false;
+    $('devName').textContent = device.name || '(未命名设备)';
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    await gattConnect();
+  } catch (e) {
+    if (e.name === 'NotFoundError') log('已取消选择（没有选设备）');
+    else log('连接失败：' + e.name + ' ' + e.message, 'err');
+  }
+}
+
+async function gattConnect() {
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  ch.ctrl   = await svc.getCharacteristic(U.ctrl);
+  ch.status = await svc.getCharacteristic(U.status);
+  ch.soc    = await svc.getCharacteristic(U.soc);
+  ch.volt   = await svc.getCharacteristic(U.volt);
+  ch.led    = await svc.getCharacteristic(U.led);
+  ch.adv    = await svc.getCharacteristic(U.adv);
+  ch.auto   = await svc.getCharacteristic(U.auto);
+
+  for (const k of ['status', 'soc', 'volt']) {
+    ch[k].addEventListener('characteristicvaluechanged', ev => onNotify(k, ev.target.value));
+    try { await ch[k].startNotifications(); }
+    catch (e) { log(`订阅 ${k} 通知失败：${e.message}`, 'err'); }
+  }
+
+  setConnected(true);
+  log('已连接：服务与全部特征读取完毕', 'ok');
+  await readAll();
+}
+
+async function readAll() {
+  if (!connected) return;
+  try {
+    onNotify('status', await ch.status.readValue());
+    onNotify('soc',    await ch.soc.readValue());
+    onNotify('volt',   await ch.volt.readValue());
+    onNotify('led',    await ch.led.readValue());
+    onNotify('adv',    await ch.adv.readValue());
+    onNotify('auto',   await ch.auto.readValue());
+  } catch (e) { log('读取失败：' + e.message, 'err'); }
+}
+
+function onNotify(key, dataView) {
+  const d = new DataView(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+  if (key === 'status') {
+    const on = parseStatus(d);
+    // 快速连点时，先到的往往是上一条指令的陈旧回报：不回灌 UI、不误报「没有执行」。
+    if (lastReq !== null && on !== lastReq && Date.now() - lastCmdMs < 250) {
+      return;
+    }
+    setLaserUI(on);
+    if (lastReq !== null) {
+      if (on === lastReq) log(`设备已确认：激光 ${on ? 'ON' : 'OFF'}`, 'ok');
+      else log('设备没有执行：可能电量低于保护阈值（3.40 V），串口会打印 ON refused', 'err');
+      lastReq = null;
+    }
+  } else if (key === 'soc') {
+    window.__soc = parseSoc(d); setBattery(window.__soc, window.__mv || 0);
+  } else if (key === 'volt') {
+    window.__mv = parseVolt(d); setBattery(window.__soc ?? 0xFF, window.__mv);
+  } else if (key === 'led') {                 // 设备侧的心跳灯配置
+    ledEn.checked = d.getUint8(0) === 1;
+    // 正在输入的时候别把用户打的字覆盖掉
+    if (document.activeElement !== ledSec) ledSec.value = (d.getUint16(1, true) / 10).toFixed(1);
+  } else if (key === 'auto') {                // 设备侧的自动关机配置
+    autoEn.checked = d.getUint8(0) === 1;
+    if (document.activeElement !== autoMin) autoMin.value = d.getUint16(1, true);
+  } else {                                    // adv：设备侧的广播间隔（ms）
+    if (document.activeElement !== advSec) advSec.value = d.getUint16(0, true);
+  }
+}
+
+function onDisconnected() {
+  setConnected(false);
+  log('连接已断开');
+  if (!manual) tryReconnect();
+}
+
+// 手机切后台常常被系统断链，自动重连省得每次手点
+async function tryReconnect() {
+  if (reconnecting || manual || !device) return;
+  reconnecting = true;
+  document.body.classList.add('retry');
+  $('connText').textContent = '重连中';
+  for (let i = 0; i < 4; i++) {
+    await new Promise(r => setTimeout(r, 800 * (i + 1)));
+    if (manual) break;
+    try { await gattConnect(); reconnecting = false; log('重连成功', 'ok'); return; }
+    catch (e) { log(`重连第 ${i + 1} 次失败：${e.message}`); }
+  }
+  reconnecting = false;
+  document.body.classList.remove('retry');
+  $('connText').textContent = '未连接';
+  log('自动重连失败，请点“连接蓝牙”', 'err');
+}
+
+// ---------------------------------------------------------------- 交互 ----
+btn.addEventListener('click', async () => {
+  if (connected) {
+    manual = true;
+    device.gatt.disconnect();
+    setConnected(false);
+    log('已主动断开（设备上若无其它客户端，激光会自动关闭）');
+  } else {
+    await connect();
+  }
+});
+
+// 关机：让设备进深度睡眠。之后蓝牙断开、页面连不上，只能按板子上的 RST 开机，
+// 所以这里加一道确认，避免误点。
+btnOff.addEventListener('click', async () => {
+  if (!connected) return;
+  if (!confirm('确定让设备关机（进入深度睡眠）？\n\n设备会先关激光、灭指示灯，然后断开蓝牙。\n重新开机需要按板子上的 RST 键（或断电重上电）。')) return;
+  try {
+    const buf = new Uint8Array([2]);   // BLE_CMD_POWER_OFF
+    if (ch.ctrl.properties.writeWithoutResponse) await ch.ctrl.writeValueWithoutResponse(buf);
+    else await ch.ctrl.writeValue(buf);
+    log('已发送关机指令：设备将关激光、灭灯并进入深睡（按 RST 开机）', 'ok');
+  } catch (e) {
+    log('关机指令发送失败：' + e.message, 'err');
+  }
+});
+
+sw.addEventListener('change', async () => {
+  if (!connected) return;
+  const on = sw.checked;
+  try {
+    const buf = new Uint8Array([on ? 1 : 0]);
+    lastReq = on;
+    lastCmdMs = Date.now();
+    // 固件两个属性都开了，优先用无响应写，延迟更低
+    if (ch.ctrl.properties.writeWithoutResponse) await ch.ctrl.writeValueWithoutResponse(buf);
+    else await ch.ctrl.writeValue(buf);
+    log(`已发送 0x0${on ? 1 : 0} → 请求激光${on ? '开' : '关'}`);
+    // 兜底回读防抖：连点时只保留最后一次，避免 READ 在 GATT 队列里打架
+    if (fallbackTimer) clearTimeout(fallbackTimer);
+    fallbackTimer = setTimeout(readAll, 900);
+  } catch (e) {
+    log('指令发送失败：' + e.message, 'err');
+    lastReq = null;
+    sw.checked = !on;
+  }
+});
+
+// 快速连点：手指「按下」就发指令（不等抬起，单次省 50~150 ms），
+// 随后由 label 派生的原生 click 吞掉，防止二次切换。
+let suppressNativeClick = 0;
+wrap.addEventListener('pointerdown', e => {
+  if (!connected) return;
+  e.preventDefault();
+  suppressNativeClick = Date.now() + 500;
+  sw.checked = !sw.checked;
+  sw.dispatchEvent(new Event('change'));
+});
+wrap.addEventListener('click', e => {
+  if (Date.now() < suppressNativeClick) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && device && !connected && !manual) tryReconnect();
+});
+
+// -------------------------------------------------------- 心跳指示灯 ----
+// ledSec 里的“秒”换成固件的 0.1 s 单位，并夹到 0.1~30 s
+function ledDurationDs() {
+  const v = parseFloat(ledSec.value);
+  const sec = isFinite(v) ? Math.min(30, Math.max(0.1, v)) : 1;
+  return Math.round(sec * 10);
+}
+
+async function writeLed(cmd) {
+  if (!connected) return;
+  const ds = ledDurationDs();
+  ledSec.value = (ds / 10).toFixed(1);
+  try {
+    const buf = ledBytes(cmd, ds);
+    if (ch.led.properties.writeWithoutResponse) await ch.led.writeValueWithoutResponse(buf);
+    else await ch.led.writeValue(buf);
+    const what = cmd === 2 ? '闪一次' : cmd === 1 ? '开启心跳' : '关闭心跳';
+    log(`心跳灯：${what}，每次亮 ${(ds / 10).toFixed(1)} s`);
+    setTimeout(readAll, 500);      // 回读设备侧真实配置
+  } catch (e) {
+    log('心跳灯设置失败：' + e.message, 'err');
+  }
+}
+
+ledEn.addEventListener('change', () => writeLed(ledEn.checked ? 1 : 0));
+ledSec.addEventListener('change', () => writeLed(ledEn.checked ? 1 : 0));
+ledTest.addEventListener('click', () => writeLed(2));
+
+// ---------------------------------------------------------- 省电设置 ----
+function advMsValue() {
+  const v = parseInt(advSec.value, 10);
+  return isFinite(v) ? Math.min(10240, Math.max(20, v)) : 500;
+}
+
+async function writeAdv() {
+  if (!connected) return;
+  const ms = advMsValue();
+  advSec.value = ms;
+  try {
+    const buf = new Uint8Array([ms & 0xFF, (ms >> 8) & 0xFF]);
+    if (ch.adv.properties.writeWithoutResponse) await ch.adv.writeValueWithoutResponse(buf);
+    else await ch.adv.writeValue(buf);
+    log(`广播间隔设为 ${ms} ms（已存进设备，按 RST / 断电后依然生效）`);
+    setTimeout(readAll, 500);
+  } catch (e) {
+    log('广播间隔设置失败：' + e.message, 'err');
+  }
+}
+
+advSec.addEventListener('change', writeAdv);
+advSet.addEventListener('click', writeAdv);
+
+// ---------------------------------------------- 空闲自动关机（7d000008）----
+// 写 [mode, 分钟小端]；改开关或分钟数都会立刻下发并存进设备 NVS。
+function autoMsValue() {
+  const v = parseInt(autoMin.value, 10);
+  return isFinite(v) ? Math.min(1440, Math.max(1, v)) : 5;
+}
+
+async function writeAuto() {
+  if (!connected) return;
+  const mins = autoMsValue();
+  autoMin.value = mins;
+  const buf = new Uint8Array([autoEn.checked ? 1 : 0, mins & 0xFF, (mins >> 8) & 0xFF]);
+  try {
+    if (ch.auto.properties.writeWithoutResponse) await ch.auto.writeValueWithoutResponse(buf);
+    else await ch.auto.writeValue(buf);
+    log(`自动关机：${autoEn.checked ? '开' : '关'}，无人连接 ${mins} 分钟后（已存进设备）`);
+    setTimeout(readAll, 500);
+  } catch (e) {
+    log('自动关机设置失败：' + e.message, 'err');
+  }
+}
+
+autoEn.addEventListener('change', writeAuto);
+autoMin.addEventListener('change', writeAuto);
+
+// ---------------------------------------------- 自动找回上次的设备 ----
+// 浏览器若记得授权过的设备（Chrome 的持久化权限），打开页面就直接连上，不用再选一次；
+// 不支持 / 没权限时静默跳过，按钮照样能用。
+async function autoFind() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+  try {
+    const list = await navigator.bluetooth.getDevices();
+    const dev = (list || []).find(d => (d.name || '').startsWith('LaserTarget'));
+    if (!dev) return;
+    device = dev;
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    $('devName').textContent = device.name || '(未命名设备)';
+    log(`发现上次连过的 ${device.name}，正在自动连接…`);
+    await gattConnect();
+  } catch (e) {
+    log('自动连接没成功（点「连接蓝牙」选一次即可）');
+  }
+}
+
+// ---------------------------------------------------------------- 主题 ----
+const themeSel = $('theme');
+themeSel.value = window.__themeQuery || window.__theme;
+
+themeSel.addEventListener('change', () => {
+  const t = themeSel.value;
+  const name = window.__applyTheme(t);
+  try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* 无痕模式忽略 */ }
+  window.__theme = t;
+  const label = themeSel.options[themeSel.selectedIndex].text;
+  log(`主题：${label}${t === 'auto' ? `（当前${name === 'light' ? '浅色' : '深色'}）` : ''}`);
+});
+
+// 跟随系统时，系统当场切深浅色也要立刻生效
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  if (window.__theme === 'auto') window.__applyTheme('auto');
+});
+
+// ---------------------------------------------------------- 自检 / 启动 ----
+if (new URLSearchParams(location.search).has('selftest')) {
+  const cases = [
+    ['电压小端解析',        parseVolt(dv([0x51, 0x0F])), 3921],
+    ['电压边界',            parseVolt(dv([0xFF, 0xFF])), 65535],
+    ['状态 ON',             parseStatus(dv([1])), true],
+    ['状态 OFF',            parseStatus(dv([0])), false],
+    ['电量解析',            parseSoc(dv([88])), 88],
+    ['心跳灯 1.0 s 打包',   ledBytes(1, 10).join(','), '1,10,0'],
+    ['心跳灯 30 s 打包',    ledBytes(2, 300).join(','), '2,44,1']
+  ];
+  let bad = 0;
+  for (const [what, got, want] of cases) {
+    if (got !== want) { bad++; log(`selftest 失败：${what}（得到 ${got}，应为 ${want}）`, 'err'); }
+  }
+  log(`selftest ${bad ? '失败' : '通过'} ${cases.length - bad}/${cases.length} 项`, bad ? 'err' : 'ok');
+}
+
+if (!navigator.bluetooth) {
+  $('nobt').style.display = 'block';
+  log('本浏览器没有 navigator.bluetooth（需要 Chrome/Edge，且必须是 https 或 file:// 页面）', 'err');
+}
+setConnected(false);
+$('upd').textContent = '尚未收到数据';
+log('页面就绪。点「连接蓝牙」后选择 LaserTarget-S3。');
+autoFind();     // 有持久化权限时自动连回上次那台
+</script>
+</body>
+</html>

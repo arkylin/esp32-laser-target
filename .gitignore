@@ -1,0 +1,17 @@
+# PlatformIO
+.pio/
+.vscode/
+*.elf
+*.bin
+*.map
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 本地 AI 记忆 / 扫描产物，不属于工程
+.consciousness/
+.mimosa/
+/1.png
